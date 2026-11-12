@@ -1,5 +1,8 @@
 package com.substream.domain;
 
+import com.substream.exception.InvalidPlanTransitionException;
+import com.substream.exception.InvalidStatusTransitionException;
+
 import java.time.LocalDate;
 import java.util.Objects;
 
@@ -11,6 +14,15 @@ import java.util.Objects;
  */
 public class Subscription implements Identifiable<String> {
 
+    private final String id;
+    private final String customerId;
+    private SubscriptionPlan plan;
+    private SubscriptionStatus status;
+    private final int seatCount;
+    private final LocalDate startDate;
+    private int billingCycle;
+    private int failedPaymentAttempts;
+
     /**
      * BR-103: throws {@code IllegalArgumentException} if the plan cannot accommodate {@code seatCount}.
      * {@code null} for id, customerId, plan or startDate throws {@code NullPointerException}.
@@ -18,19 +30,29 @@ public class Subscription implements Identifiable<String> {
      */
     public Subscription(String id, String customerId, SubscriptionPlan plan, int seatCount, LocalDate startDate) {
         // TODO: M3, BR-103
-        throw new UnsupportedOperationException("TODO: M3, BR-103");
+        this.id = Objects.requireNonNull(id, "id");
+        this.customerId = Objects.requireNonNull(customerId, "customerId");
+        this.plan = Objects.requireNonNull(plan, "plan");
+        this.startDate = Objects.requireNonNull(startDate, "startDate");
+        if (!plan.canAccommodate(seatCount)) {
+            throw new IllegalArgumentException("Plan cannot accommodate the requested seats");
+        }
+        this.seatCount = seatCount;
+        this.status = SubscriptionStatus.ACTIVE;
+        this.billingCycle = 0;
+        this.failedPaymentAttempts = 0;
     }
 
     @Override
     public String getId() {
         // TODO: M3
-        throw new UnsupportedOperationException("TODO: M3");
+        return id;
     }
 
     /** BR-201: calculated from {@code startDate} and {@code billingCycle}; never stored in a field. */
     public LocalDate getRenewalDate() {
         // TODO: M3, BR-201
-        throw new UnsupportedOperationException("TODO: M3, BR-201");
+        return startDate.plusMonths((long) billingCycle + 1);
     }
 
     /**
@@ -39,13 +61,23 @@ public class Subscription implements Identifiable<String> {
      */
     public boolean isDue(LocalDate today) {
         // TODO: M3, BR-301
-        throw new UnsupportedOperationException("TODO: M3, BR-301");
+        return status == SubscriptionStatus.ACTIVE && !getRenewalDate().isAfter(today);
     }
 
     /** BR-104: throws {@code InvalidPlanTransitionException} when the change is not allowed. */
     public void changePlan(SubscriptionPlan target) {
         // TODO: M3, BR-104
-        throw new UnsupportedOperationException("TODO: M3, BR-104");
+        if (status != SubscriptionStatus.ACTIVE) {
+            throw new InvalidPlanTransitionException("Only an ACTIVE subscription can change plans");
+        }
+        Objects.requireNonNull(target, "target");
+        if (target == plan) {
+            throw new InvalidPlanTransitionException("Cannot change to the same plan");
+        }
+        if (!target.canAccommodate(seatCount)) {
+            throw new InvalidPlanTransitionException("Target plan cannot accommodate the current seats");
+        }
+        plan = target;
     }
 
     /**
@@ -56,7 +88,11 @@ public class Subscription implements Identifiable<String> {
      */
     public void recordPaymentSuccess() {
         // TODO: M3, BR-305, BR-401
-        throw new UnsupportedOperationException("TODO: M3, BR-305, BR-401");
+        if (status != SubscriptionStatus.ACTIVE) {
+            throw new InvalidStatusTransitionException(status, SubscriptionStatus.ACTIVE);
+        }
+        billingCycle++;
+        failedPaymentAttempts = 0;
     }
 
     /**
@@ -70,13 +106,55 @@ public class Subscription implements Identifiable<String> {
      */
     public boolean recordPaymentFailure(int maxFailedAttempts) {
         // TODO: M3, BR-306, BR-307, BR-401
-        throw new UnsupportedOperationException("TODO: M3, BR-306, BR-307, BR-401");
+        if (status != SubscriptionStatus.ACTIVE) {
+            throw new InvalidStatusTransitionException(status, SubscriptionStatus.SUSPENDED);
+        }
+        if (maxFailedAttempts < 1) {
+            throw new IllegalArgumentException("Maximum failed attempts must be positive");
+        }
+        failedPaymentAttempts++;
+        if (failedPaymentAttempts >= maxFailedAttempts) {
+            status = SubscriptionStatus.SUSPENDED;
+            return true;
+        }
+        return false;
     }
 
     /** BR-401 */
     public void cancel() {
         // TODO: M3, BR-401
-        throw new UnsupportedOperationException("TODO: M3, BR-401");
+        if (status == SubscriptionStatus.CANCELLED) {
+            throw new InvalidStatusTransitionException(status, SubscriptionStatus.CANCELLED);
+        }
+        status = SubscriptionStatus.CANCELLED;
+    }
+
+    public String getCustomerId() {
+        return customerId;
+    }
+
+    public SubscriptionPlan getPlan() {
+        return plan;
+    }
+
+    public SubscriptionStatus getStatus() {
+        return status;
+    }
+
+    public int getSeatCount() {
+        return seatCount;
+    }
+
+    public LocalDate getStartDate() {
+        return startDate;
+    }
+
+    public int getBillingCycle() {
+        return billingCycle;
+    }
+
+    public int getFailedPaymentAttempts() {
+        return failedPaymentAttempts;
     }
 
     /** PROVIDED (section 4.7): equality is based on {@code id} only, as you wrote it for Customer in M1. */

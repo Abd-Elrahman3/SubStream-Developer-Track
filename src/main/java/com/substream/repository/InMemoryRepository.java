@@ -2,6 +2,8 @@ package com.substream.repository;
 
 import com.substream.domain.Identifiable;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 
@@ -15,27 +17,30 @@ import java.util.Optional;
  */
 public class InMemoryRepository<T extends Identifiable<ID>, ID> implements Repository<T, ID> {
 
+    private final Map<ID, T> entities = new LinkedHashMap<>();
+
     @Override
     public T save(T entity) {
         // TODO: M2
-        throw new UnsupportedOperationException("TODO: M2");
+        entities.put(entity.getId(), entity);
+        return entity;
     }
 
     @Override
     public Optional<T> findById(ID id) {
         // TODO: M2
-        throw new UnsupportedOperationException("TODO: M2");
+        return Optional.ofNullable(entities.get(id));
     }
 
     @Override
     public List<T> findAll() {
         // TODO: M2
-        throw new UnsupportedOperationException("TODO: M2");
+        return List.copyOf(entities.values());
     }
 
     @Override
     public long count() {
         // TODO: M2
-        throw new UnsupportedOperationException("TODO: M2");
+        return entities.size();
     }
 }
