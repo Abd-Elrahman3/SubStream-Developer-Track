@@ -6,6 +6,7 @@ import com.substream.domain.Invoice;
 import com.substream.domain.InvoiceStatus;
 import com.substream.domain.Subscription;
 import com.substream.domain.SubscriptionPlan;
+import com.substream.domain.SubscriptionStatus;
 import com.substream.exception.CustomerNotFoundException;
 import com.substream.exception.PaymentGatewayTimeoutException;
 import com.substream.external.PaymentGateway;
@@ -17,8 +18,6 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * D5 (renewal happy path) and D6 (failures and suspension).
@@ -26,10 +25,6 @@ import java.util.logging.Logger;
  * "Today" is always {@code LocalDate.now(clock)} (BR-202).
  */
 public class BillingEngine {
-
-    private static final Logger LOGGER = Logger.getLogger(BillingEngine.class.getName());
-
-    private enum Outcome { SUCCEEDED, FAILED, SUSPENDED }
 
     private final SubscriptionRepository subscriptionRepository;
     private final CustomerRepository customerRepository;
@@ -72,22 +67,23 @@ public class BillingEngine {
             }
             eligible++;
             try {
-                switch (processRenewal(subscription, today)) {
-                    case SUCCEEDED -> succeeded++;
-                    case FAILED -> failed++;
-                    case SUSPENDED -> suspended++;
+                Invoice invoice = processRenewal(subscription, today);
+                if (invoice.getStatus() == InvoiceStatus.PAID) {
+                    succeeded++;
+                } else if (subscription.getStatus() == SubscriptionStatus.SUSPENDED) {
+                    suspended++;
+                } else {
+                    failed++;
                 }
             } catch (RuntimeException exception) {
-                // BR-308: isolate an unexpected error to this subscription, and retain diagnostics.
+                // BR-308: count an unexpected error as failed and continue with the next subscription.
                 failed++;
-                LOGGER.log(Level.WARNING,
-                        "Could not process subscription " + subscription.getId(), exception);
             }
         }
         return new BillingRunSummary(eligible, succeeded, failed, suspended);
     }
 
-    private Outcome processRenewal(Subscription subscription, LocalDate today) {
+    private Invoice processRenewal(Subscription subscription, LocalDate today) {
         Customer customer = customerRepository.findById(subscription.getCustomerId())
                 .orElseThrow(() -> new CustomerNotFoundException(subscription.getCustomerId()));
         Invoice invoice = findOrCreateInvoice(subscription, today);
@@ -109,9 +105,8 @@ public class BillingEngine {
         if (suspended) {
             // Persist the suspension before notifying; a delivery error must not trigger another charge.
             notificationService.notifySuspension(customer, subscription);
-            return Outcome.SUSPENDED;
         }
-        return paid ? Outcome.SUCCEEDED : Outcome.FAILED;
+        return invoice;
     }
 
     private Invoice findOrCreateInvoice(Subscription subscription, LocalDate today) {
@@ -131,7 +126,6 @@ public class BillingEngine {
             return paymentGateway.charge(customer.getId(), invoice.getAmount()).isSuccess();
         } catch (PaymentGatewayTimeoutException | RuntimeException exception) {
             // BR-306: only gateway exceptions are converted into payment failures.
-            LOGGER.log(Level.FINE, "Payment attempt failed for invoice " + invoice.getId(), exception);
             return false;
         }
     }
