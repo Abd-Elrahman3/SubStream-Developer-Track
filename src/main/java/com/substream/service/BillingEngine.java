@@ -3,6 +3,7 @@ package com.substream.service;
 
 import com.substream.domain.Customer;
 import com.substream.domain.Invoice;
+import com.substream.domain.InvoiceStatus;
 import com.substream.domain.Subscription;
 import com.substream.domain.SubscriptionPlan;
 import com.substream.exception.CustomerNotFoundException;
@@ -16,6 +17,8 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * D5 (renewal happy path) and D6 (failures and suspension).
@@ -23,6 +26,10 @@ import java.util.UUID;
  * "Today" is always {@code LocalDate.now(clock)} (BR-202).
  */
 public class BillingEngine {
+
+    private static final Logger LOGGER = Logger.getLogger(BillingEngine.class.getName());
+
+    private enum Outcome { SUCCEEDED, FAILED, SUSPENDED }
 
     private final SubscriptionRepository subscriptionRepository;
     private final CustomerRepository customerRepository;
@@ -57,50 +64,76 @@ public class BillingEngine {
         int eligible = 0;
         int succeeded = 0;
         int failed = 0;
+        int suspended = 0;
 
         for (Subscription subscription : subscriptionRepository.findAll()) {
             if (!subscription.isDue(today)) {
                 continue;
             }
             eligible++;
-            if (processRenewal(subscription, today)) {
-                succeeded++;
-            } else {
+            try {
+                switch (processRenewal(subscription, today)) {
+                    case SUCCEEDED -> succeeded++;
+                    case FAILED -> failed++;
+                    case SUSPENDED -> suspended++;
+                }
+            } catch (RuntimeException exception) {
+                // BR-308: isolate an unexpected error to this subscription, and retain diagnostics.
                 failed++;
+                LOGGER.log(Level.WARNING,
+                        "Could not process subscription " + subscription.getId(), exception);
             }
         }
-        return new BillingRunSummary(eligible, succeeded, failed, 0);
+        return new BillingRunSummary(eligible, succeeded, failed, suspended);
     }
 
-    private boolean processRenewal(Subscription subscription, LocalDate today) {
+    private Outcome processRenewal(Subscription subscription, LocalDate today) {
         Customer customer = customerRepository.findById(subscription.getCustomerId())
                 .orElseThrow(() -> new CustomerNotFoundException(subscription.getCustomerId()));
-        Invoice invoice = createInvoice(subscription, today);
+        Invoice invoice = findOrCreateInvoice(subscription, today);
         boolean paid = subscription.getPlan() == SubscriptionPlan.FREE
                 || charge(customer, invoice);
+        boolean suspended = false;
 
         if (paid) {
             invoice.markPaid();
             subscription.recordPaymentSuccess();
+        } else {
+            suspended = subscription.recordPaymentFailure(config.maxFailedAttempts());
         }
 
+        // BR-303: save the invoice exactly once, after the attempt's outcome is known.
         invoiceRepository.save(invoice);
         subscriptionRepository.save(subscription);
-        return paid;
+
+        if (suspended) {
+            // Persist the suspension before notifying; a delivery error must not trigger another charge.
+            notificationService.notifySuspension(customer, subscription);
+            return Outcome.SUSPENDED;
+        }
+        return paid ? Outcome.SUCCEEDED : Outcome.FAILED;
     }
 
-    private Invoice createInvoice(Subscription subscription, LocalDate today) {
-        return new Invoice(UUID.randomUUID().toString(), subscription.getId(),
-                subscription.getRenewalDate(), subscription.getPlan().getMonthlyPrice(),
-                today, today.plusDays(config.invoiceDueDays()));
+    private Invoice findOrCreateInvoice(Subscription subscription, LocalDate today) {
+        LocalDate periodStart = subscription.getRenewalDate();
+        Invoice invoice = invoiceRepository.findByKey(subscription.getId(), periodStart)
+                .orElseGet(() -> new Invoice(UUID.randomUUID().toString(), subscription.getId(),
+                        periodStart, subscription.getPlan().getMonthlyPrice(), today,
+                        today.plusDays(config.invoiceDueDays())));
+        if (invoice.getStatus() != InvoiceStatus.UNPAID) {
+            throw new IllegalStateException("The renewal period already has a paid invoice");
+        }
+        return invoice;
     }
 
     private boolean charge(Customer customer, Invoice invoice) {
         try {
             return paymentGateway.charge(customer.getId(), invoice.getAmount()).isSuccess();
-        } catch (PaymentGatewayTimeoutException exception) {
-            // D6 will convert gateway exceptions into recorded payment failures.
-            throw new IllegalStateException("The payment gateway timed out", exception);
+        } catch (PaymentGatewayTimeoutException | RuntimeException exception) {
+            // BR-306: only gateway exceptions are converted into payment failures.
+            LOGGER.log(Level.FINE, "Payment attempt failed for invoice " + invoice.getId(), exception);
+            return false;
         }
     }
+
 }
