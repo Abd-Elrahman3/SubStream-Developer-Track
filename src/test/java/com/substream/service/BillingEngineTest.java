@@ -13,6 +13,7 @@ import com.substream.repository.InMemoryCustomerRepository;
 import com.substream.repository.InMemoryInvoiceRepository;
 import com.substream.repository.InMemorySubscriptionRepository;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -26,7 +27,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** D5 and D6: fixed dates, real repositories, and controllable external collaborators. */
+/** D5 and D6: fixed dates, real repositories, and controllable external collaborators.
+ * The required checklist tests cover PRO renewal, FREE bypass, and three-decline suspension.
+ * Additional tests verify README BR-202 and BR-301 through BR-309 via runRenewals().
+ */
 class BillingEngineTest {
 
     private static final LocalDate TODAY = LocalDate.of(2024, 3, 1);
@@ -46,6 +50,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("D5 required: due PRO is billed and renewed (BR-302, BR-305)")
     void billsDueProAtMonthlyPriceAndRenews() {
         Subscription subscription = dueSubscription("s-1", SubscriptionPlan.PRO, 10);
         AtomicInteger charges = new AtomicInteger();
@@ -65,17 +70,20 @@ class BillingEngineTest {
                 () -> assertEquals(1, charges.get()),
                 () -> assertEquals(1, invoices.count()),
                 () -> assertEquals(List.of(InvoiceStatus.PAID), invoices.savedStatuses),
+                () -> assertEquals(InvoiceStatus.PAID, invoice.getStatus()),
                 () -> assertMoney("29.00", invoice.getAmount()),
                 () -> assertEquals(2, invoice.getAmount().scale()),
                 () -> assertEquals(TODAY, invoice.getIssueDate()),
                 () -> assertEquals(TODAY.plusDays(14), invoice.getDueDate()),
                 () -> assertEquals(1, subscription.getBillingCycle()),
+                () -> assertEquals(0, subscription.getFailedPaymentAttempts()),
                 () -> assertEquals(TODAY.plusMonths(1), subscription.getRenewalDate()),
                 () -> assertEquals(SubscriptionStatus.ACTIVE, subscription.getStatus()),
                 () -> assertTrue(notified.isEmpty()));
     }
 
     @Test
+    @DisplayName("D5 required: FREE renews without charging the gateway (BR-304)")
     void freeRenewsWithoutCallingGateway() {
         Subscription subscription = dueSubscription("free", SubscriptionPlan.FREE, 1);
         PaymentGateway gateway = (customerId, amount) -> fail("FREE must never call the gateway");
@@ -93,6 +101,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-301: only due ACTIVE subscriptions are eligible")
     void skipsFutureCancelledAndSuspendedSubscriptions() {
         subscriptions.save(new Subscription("future", "c-1", SubscriptionPlan.PRO,
                 1, TODAY));
@@ -110,6 +119,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-301, BR-306: bill an overdue subscription once per run")
     void billsAnOverdueSubscriptionOnlyOncePerRun() {
         Subscription subscription = new Subscription("late", "c-1", SubscriptionPlan.PRO,
                 1, LocalDate.of(2024, 1, 1));
@@ -132,6 +142,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-302: invoice due date uses BillingConfig")
     void usesConfiguredInvoiceDueDays() {
         dueSubscription("s-1", SubscriptionPlan.PRO, 1);
         BillingEngine engine = engine((id, amount) -> PaymentResult.success("tx"),
@@ -143,8 +154,9 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-202: today uses the injected clock and its time zone")
     void usesTheInjectedClocksTimeZoneForToday() {
-        // Same instant as CLOCK, but the local date in this zone is March 2.
+        // At 23:30 UTC on March 1, this clock's local date is March 2.
         Clock localClock = Clock.fixed(Instant.parse("2024-03-01T23:30:00Z"),
                 ZoneOffset.ofHours(2));
         Subscription subscription = new Subscription("local-date", "c-1", SubscriptionPlan.PRO,
@@ -159,11 +171,13 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-306: a decline leaves an unpaid invoice and counts one failure")
     void declineKeepsInvoiceUnpaidAndRenewalDateUnchanged() {
         assertPaymentFailure((id, amount) -> PaymentResult.failed("declined"));
     }
 
     @Test
+    @DisplayName("BR-306: a checked gateway timeout counts as a payment failure")
     void timeoutCountsAsPaymentFailure() {
         assertPaymentFailure((id, amount) -> {
             throw new PaymentGatewayTimeoutException("provider timed out");
@@ -171,6 +185,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-306: a gateway RuntimeException counts as a payment failure")
     void gatewayRuntimeExceptionCountsAsPaymentFailure() {
         assertPaymentFailure((id, amount) -> {
             throw new IllegalStateException("provider unavailable");
@@ -178,17 +193,21 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-303, BR-305: retry the same invoice and reset two failures on success")
     void retryReusesInvoiceAndResetsFailureCounterAfterSuccess() {
         Subscription subscription = dueSubscription("s-1", SubscriptionPlan.PRO, 1);
         engine((id, amount) -> PaymentResult.failed("declined")).runRenewals();
         Invoice original = invoices.findByKey("s-1", TODAY).orElseThrow();
         String invoiceId = original.getId();
-        // An outstanding invoice retains its original price even if the plan changes.
-        subscription.changePlan(SubscriptionPlan.ENTERPRISE);
+        // BR-307 example: two consecutive failures, then a success resets the counter.
+        engine((id, amount) -> PaymentResult.failed("declined again")).runRenewals();
+        assertEquals(2, subscription.getFailedPaymentAttempts());
+        assertEquals(SubscriptionStatus.ACTIVE, subscription.getStatus());
+        // BR-303: a later retry reuses the existing invoice, including its original dates.
         Clock tomorrow = Clock.fixed(Instant.parse("2024-03-02T00:00:00Z"), ZoneOffset.UTC);
         PaymentGateway gateway = (id, amount) -> {
             assertMoney("29.00", amount);
-            assertEquals(1, invoices.savedStatuses.size());
+            assertEquals(2, invoices.savedStatuses.size());
             return PaymentResult.success("tx-retry");
         };
 
@@ -200,10 +219,11 @@ class BillingEngineTest {
                 () -> assertEquals(new BillingRunSummary(1, 1, 0, 0), summary),
                 () -> assertEquals(1, invoices.count()),
                 () -> assertEquals(invoiceId, retried.getId()),
+                () -> assertEquals(InvoiceStatus.PAID, retried.getStatus()),
                 () -> assertEquals(TODAY, retried.getIssueDate()),
                 () -> assertEquals(TODAY.plusDays(14), retried.getDueDate()),
                 () -> assertMoney("29.00", retried.getAmount()),
-                () -> assertEquals(List.of(InvoiceStatus.UNPAID, InvoiceStatus.PAID), invoices.savedStatuses),
+                () -> assertEquals(List.of(InvoiceStatus.UNPAID, InvoiceStatus.UNPAID, InvoiceStatus.PAID), invoices.savedStatuses),
                 () -> assertEquals(0, subscription.getFailedPaymentAttempts()),
                 () -> assertEquals(1, subscription.getBillingCycle()),
                 () -> assertEquals(SubscriptionStatus.ACTIVE, subscription.getStatus()),
@@ -211,6 +231,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("D6 required: three declines suspend and notify once (BR-307)")
     void threeDeclinesSuspendAndNotifyExactlyOnce() {
         Subscription subscription = dueSubscription("s-1", SubscriptionPlan.PRO, 1);
         AtomicInteger charges = new AtomicInteger();
@@ -243,6 +264,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-307: suspend at the configured limit and notify the correct customer")
     void usesConfiguredSuspensionLimitAndNotifiesWithCustomerAndSubscription() {
         Subscription subscription = dueSubscription("s-1", SubscriptionPlan.PRO, 1);
         List<String> notices = new ArrayList<>();
@@ -261,6 +283,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-308: a missing customer does not stop the run")
     void missingCustomerCountsAsFailedAndDoesNotStopLaterSubscriptions() {
         subscriptions.save(new Subscription("orphan", "missing", SubscriptionPlan.PRO,
                 1, TODAY.minusMonths(1)));
@@ -280,6 +303,7 @@ class BillingEngineTest {
     }
 
     @Test
+    @DisplayName("BR-308, BR-309: a notification error counts failed, even after suspension")
     void notificationExceptionCountsAsFailedAndDoesNotStopLaterSubscriptions() {
         Subscription brokenNotice = dueSubscription("broken-notice", SubscriptionPlan.PRO, 1);
         brokenNotice.recordPaymentFailure(3);
@@ -291,19 +315,29 @@ class BillingEngineTest {
             throw new IllegalStateException("notification unavailable");
         };
 
-        BillingRunSummary summary = engine((id, amount) -> PaymentResult.failed("declined"),
-                throwingNotifier, BillingConfig.defaults(), CLOCK).runRenewals();
+        BillingEngine billingEngine = engine((id, amount) -> PaymentResult.failed("declined"),
+                throwingNotifier, BillingConfig.defaults(), CLOCK);
+        BillingRunSummary summary = billingEngine.runRenewals();
 
         assertEquals(new BillingRunSummary(2, 1, 1, 0), summary);
         assertEquals(SubscriptionStatus.SUSPENDED, brokenNotice.getStatus());
         assertEquals(1, notices.get());
         assertEquals(1, healthy.getBillingCycle());
+        assertEquals(InvoiceStatus.UNPAID,
+                invoices.findByKey("broken-notice", TODAY).orElseThrow().getStatus());
+        assertEquals(InvoiceStatus.PAID,
+                invoices.findByKey("healthy", TODAY).orElseThrow().getStatus());
+
+        // The suspended subscription is no longer due, even when delivery failed.
+        assertEquals(new BillingRunSummary(0, 0, 0, 0), billingEngine.runRenewals());
+        assertEquals(1, notices.get());
     }
 
     @Test
+    @DisplayName("BR-309: count paid, declined, and suspended results separately")
     void mixedRunCountsEveryEligibleSubscriptionExactlyOnce() {
-        dueSubscription("paid", SubscriptionPlan.FREE, 1);
-        dueSubscription("declined", SubscriptionPlan.PRO, 1);
+        Subscription paid = dueSubscription("paid", SubscriptionPlan.FREE, 1);
+        Subscription declined = dueSubscription("declined", SubscriptionPlan.PRO, 1);
         Subscription atLimit = dueSubscription("at-limit", SubscriptionPlan.ENTERPRISE, 1);
         atLimit.recordPaymentFailure(3);
         atLimit.recordPaymentFailure(3);
@@ -311,12 +345,23 @@ class BillingEngineTest {
         BillingRunSummary summary = engine((id, amount) -> PaymentResult.failed("declined"))
                 .runRenewals();
 
+        // ACTIVE alone cannot distinguish a paid renewal from an ordinary decline.
+        assertEquals(InvoiceStatus.PAID,
+                invoices.findByKey("paid", TODAY).orElseThrow().getStatus());
+        assertEquals(SubscriptionStatus.ACTIVE, paid.getStatus());
+        assertEquals(InvoiceStatus.UNPAID,
+                invoices.findByKey("declined", TODAY).orElseThrow().getStatus());
+        assertEquals(SubscriptionStatus.ACTIVE, declined.getStatus());
+        assertEquals(InvoiceStatus.UNPAID,
+                invoices.findByKey("at-limit", TODAY).orElseThrow().getStatus());
+        assertEquals(SubscriptionStatus.SUSPENDED, atLimit.getStatus());
         assertEquals(new BillingRunSummary(3, 1, 1, 1), summary);
         assertEquals(summary.eligible(), summary.succeeded() + summary.failed() + summary.suspended());
         assertEquals(List.of("at-limit"), notified);
     }
 
     @Test
+    @DisplayName("BR-309: an empty run has zero counts")
     void emptyRepositoryProducesEmptySummary() {
         PaymentGateway gateway = (id, amount) -> fail("There is nothing to charge");
 
@@ -340,10 +385,21 @@ class BillingEngineTest {
     private void assertPaymentFailure(PaymentGateway gateway) {
         Subscription subscription = dueSubscription("s-1", SubscriptionPlan.PRO, 1);
 
-        BillingRunSummary summary = engine(gateway).runRenewals();
+        AtomicInteger charges = new AtomicInteger();
+        PaymentGateway countedGateway = (customerId, amount) -> {
+            charges.incrementAndGet();
+            assertTrue(invoices.savedStatuses.isEmpty(),
+                    "Invoice must be saved after the gateway returns or throws");
+            return gateway.charge(customerId, amount);
+        };
+        BillingRunSummary summary = engine(countedGateway).runRenewals();
+        Invoice invoice = invoices.findByKey("s-1", TODAY).orElseThrow();
 
         assertAll(
                 () -> assertEquals(new BillingRunSummary(1, 0, 1, 0), summary),
+                () -> assertEquals(1, charges.get()),
+                () -> assertEquals(1, invoices.count()),
+                () -> assertEquals(InvoiceStatus.UNPAID, invoice.getStatus()),
                 () -> assertEquals(List.of(InvoiceStatus.UNPAID), invoices.savedStatuses),
                 () -> assertEquals(1, subscription.getFailedPaymentAttempts()),
                 () -> assertEquals(0, subscription.getBillingCycle()),
