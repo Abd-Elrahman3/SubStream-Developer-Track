@@ -110,6 +110,25 @@ A successful retry instead marks that same invoice PAID, moves the cycle forward
 
 ## BillingEngineTest.java (D5 and D6)
 
+The source of truth is [README Module C](../README.md#module-c--billing), [the Developer Track checklist](TRACK_DEVELOPER.md), and [the JUnit primer](primers/JUNIT5.md). Tests call the public `runRenewals()` method and assert documented results using the existing domain types. They do not inspect private methods or rely on an `Outcome` enum or logging.
+
+The checklist requires three cases: `billsDueProAtMonthlyPriceAndRenews`, `freeRenewsWithoutCallingGateway`, and `threeDeclinesSuspendAndNotifyExactlyOnce`. Their JUnit display names identify them as required. The other cases are regression coverage for the same README rules, with rule IDs in their display names.
+
+| Rule | Coverage |
+| --- | --- |
+| BR-202 | Fixed clock, including its time zone |
+| BR-301 | Due today and overdue; future, suspended and cancelled entries excluded |
+| BR-302 | Customer ID, plan price regardless of seats, period, issue date, configured due date |
+| BR-303 | Same invoice on retry; exactly one save per attempt, after the gateway outcome |
+| BR-304 | FREE creates a paid zero invoice and never calls the gateway |
+| BR-305 | Paid invoice, next cycle, ACTIVE status and reset failure counter |
+| BR-306 | Decline, checked timeout and runtime error; one charge, unpaid invoice, unchanged renewal |
+| BR-307 | Third failure suspends and notifies once; configurable limit; two failures then success |
+| BR-308 | Missing customer and notification exception count failed; later subscriptions continue |
+| BR-309 | Exclusive success/failure/suspension counts, notification-error exception, empty run |
+
+`RecordingInvoiceRepository` is a small test-only subclass of the supplied `InMemoryInvoiceRepository`. It uses real storage and records the status at each save to check BR-303. Checking repository size alone cannot reveal multiple saves of the same ID. Payment and notification collaborators are lambdas, as shown in the project's primer.
+
 All tests are in `src/test/java/com/substream/service/BillingEngineTest.java`. Each JUnit test gets fresh in-memory repositories. The fixed clock represents March 1, 2024. Lambdas replace the gateway and notification service, so no real charge or notification occurs.
 
 | Method | Setup, action, and what the assertions prove |
@@ -124,19 +143,19 @@ All tests are in `src/test/java/com/substream/service/BillingEngineTest.java`. E
 | `declineKeepsInvoiceUnpaidAndRenewalDateUnchanged` | Returns a declined result and invokes the shared failure assertions. |
 | `timeoutCountsAsPaymentFailure` | Throws the checked timeout exception and invokes the same failure assertions. |
 | `gatewayRuntimeExceptionCountsAsPaymentFailure` | Throws a runtime gateway error and verifies it still updates payment-failure state, rather than only affecting the summary. |
-| `retryReusesInvoiceAndResetsFailureCounterAfterSuccess` | First declines PRO, then changes to ENTERPRISE and retries the next day. The existing unpaid invoice retains its original ID, `29.00` amount, issue/due dates, and period. Success pays it, advances one cycle and clears the failure counter. The two attempts produce exactly two saves, with the correct status each time. |
+| `retryReusesInvoiceAndResetsFailureCounterAfterSuccess` | Declines PRO twice, matching the BR-307 example, then retries successfully the next day. The existing unpaid invoice retains its original ID, `29.00` amount, issue/due dates, and period. Success pays it, advances one cycle and clears the failure counter. The three attempts produce exactly three saves: UNPAID, UNPAID, then PAID. |
 | `threeDeclinesSuspendAndNotifyExactlyOnce` | Runs the same engine three times with declines. First and second runs count as failed without notification; third suspends and records one notification. A fourth run does nothing, so there are only three charges and one notice, using one invoice throughout. |
 | `usesConfiguredSuspensionLimitAndNotifiesWithCustomerAndSubscription` | Uses a one-failure limit. The recording notifier verifies that it receives the correct customer and subscription after suspension and counter update. |
 | `missingCustomerCountsAsFailedAndDoesNotStopLaterSubscriptions` | Places an orphan subscription before a valid one. The orphan counts failed, only the valid customer's gateway is called, and that subscription renews. |
-| `notificationExceptionCountsAsFailedAndDoesNotStopLaterSubscriptions` | Starts one subscription one failure below suspension and makes its notifier throw. It remains suspended but counts as failed, while the following FREE subscription renews. |
-| `mixedRunCountsEveryEligibleSubscriptionExactlyOnce` | Processes a free success, an ordinary decline and a decline reaching the suspension limit. Checks all four summary values and their arithmetic invariant. |
+| `notificationExceptionCountsAsFailedAndDoesNotStopLaterSubscriptions` | Starts one subscription one failure below suspension and makes its notifier throw. It remains suspended with an unpaid invoice but counts as failed, while the following FREE subscription renews with a paid invoice. A second run has no eligible subscriptions and sends no second notice. |
+| `mixedRunCountsEveryEligibleSubscriptionExactlyOnce` | Processes a free success, an ordinary decline and a decline reaching the suspension limit. Checks each stored invoice and subscription status, all four summary values, and their arithmetic invariant. Both the successful and ordinarily declined subscriptions remain ACTIVE, so status alone cannot identify payment success. |
 | `emptyRepositoryProducesEmptySummary` | Verifies an empty run has zero counters, no invoices and no gateway calls. |
 
 Private helpers:
 
 - `dueSubscription` creates and saves a subscription starting one month before the fixed date, so it is due today.
 - `engine(PaymentGateway)` supplies the standard recorder, defaults and clock; the overloaded `engine` allows one test to vary a collaborator or configuration.
-- `assertPaymentFailure` checks the common contract of decline, timeout and runtime gateway errors: one unpaid save, one failure, no cycle/date advance, active state and no notice.
+- `assertPaymentFailure` checks the common contract of decline, timeout and runtime gateway errors: exactly one gateway call, no invoice save before the gateway outcome, one unpaid invoice saved once, one failure, no cycle/date advance, active state and no notice.
 - `assertMoney` compares monetary values with `BigDecimal.compareTo`, avoiding accidental sensitivity to scale; the happy-path test checks scale separately where required.
 - `RecordingInvoiceRepository.save` stores each invoice's status at the time of saving, then delegates to the real repository. Recording the enum value rather than retaining only the mutable invoice reference reveals an incorrect pre-payment save.
 
