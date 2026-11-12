@@ -5,7 +5,6 @@ import com.substream.domain.Subscription;
 import com.substream.domain.SubscriptionPlan;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.LocalDate;
@@ -76,7 +75,6 @@ class NotificationServiceTest {
     }
 
     @ParameterizedTest
-    @NullSource
     @ValueSource(strings = {"", "#", "billing", " #billing"})
     void invalidSlackChannelsAreRejected(String channel) {
         assertThrows(IllegalArgumentException.class, () -> new SlackNotificationService(channel));

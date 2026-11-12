@@ -22,7 +22,7 @@ mvn test
 mvn -Dtest=SubscriptionServiceTest,BillingEngineTest,BillingMetricsTest,NotificationServiceTest,ServicesStructureTest test
 ```
 
-The complete suite passed locally: **83 tests, 0 failures, 0 errors, 0 skipped**. This includes all existing structure tests, the supplied example tests, 45 Developer-track test invocations, and 10 new foundation regression tests. Parameterized tests count once per input value. These are local results; the external NIX grading tests were not run here.
+The complete suite passed locally: **82 tests, 0 failures, 0 errors, 0 skipped**. This includes all existing structure tests, the supplied example tests, 44 Developer-track test invocations, and 10 new foundation regression tests. Parameterized tests count once per input value. These are local results; the external NIX grading tests were not run here.
 
 A gateway or notification service in a test is a lambda controlled by the test. Nothing is charged and no email/Slack network request is sent. The missing-customer and throwing-notifier tests verify that unexpected failures count in the summary while later subscriptions continue. Billing uses the existing `PaymentResult`, `InvoiceStatus`, `SubscriptionStatus`, and `BillingRunSummary`; it does not introduce an outcome enum or a logger.
 
@@ -209,7 +209,7 @@ These tests exercise the template algorithm through its real email and Slack sub
 - **`slackUsesTheConfiguredChannelAndActualFailureCount()`** uses an ENTERPRISE subscription suspended after one failure. It checks the exact Slack line and catches hard-coding either the plan or the default failure threshold of three.
 - **`deliveredMessagesStayInDeliveryOrderAndCannotBeChanged()`** sends two different notifications, checks their exact order and content, and verifies that both `add` and `clear` throw `UnsupportedOperationException`. It then checks that the service still retains both messages.
 - **`eachServiceHasItsOwnInitiallyEmptyMessageHistory()`** creates two email services and a Slack service. After sending through only the first, it verifies that the first has one message and the others remain empty. This catches accidentally making the history static or sharing it between service objects.
-- **`invalidSlackChannelsAreRejected(String channel)`** is a parameterized test. JUnit runs it separately for `null`, `""`, `"#"`, `"billing"`, and `" #billing"`; every case must throw `IllegalArgumentException`.
+- **`invalidSlackChannelsAreRejected(String channel)`** is a parameterized test. JUnit runs it separately for `""`, `"#"`, `"billing"`, and `" #billing"`; every case must throw `IllegalArgumentException`. These are the invalid strings explicitly listed in BR-603. The test does not assert an exception type for `null`, because the README does not explicitly specify that case; requiring `IllegalArgumentException` for null produced a false alarm on the reference build.
 - **`validSlackChannelsAreUsedExactlyAsGiven(String channel)`** runs separately for `"#billing "`, `"# "`, and `"#Billing"`. Each value starts with `#` and has another character. It sends a notification and checks the complete expected line containing the original channel, catching unwanted trimming, case conversion, or stricter validation than BR-603 specifies.
 - **`suspendedSubscription(...)` helper** creates a subscription and records the requested number of failures, using that number as the suspension threshold. The result has a genuine suspended state and failure count, without setters, reflection, or mocks.
 
