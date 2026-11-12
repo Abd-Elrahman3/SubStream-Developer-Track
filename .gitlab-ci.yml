@@ -1,0 +1,109 @@
+# SubStream Campus CI — PROVIDED, DO NOT MODIFY.
+#
+#   rules-check   every Merge Request: branch name, target branch and protected files.
+#   compile       every push and Merge Request: compiles src/main/java. Nothing of yours is run.
+#
+#   Before you merge, run the structure test of your milestone on your machine, for example
+#   M1StructureTest (docs/SUBMISSION_RULES.md, section 1). The NIX bot runs it too, with the
+#   rules of the milestone and your own tests, in an isolated environment, on each new commit
+#   of a Merge Request. Its result is a comment, usually within a few minutes; it never blocks
+#   a merge.
+
+default:
+  image: eclipse-temurin:21-jdk
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - check
+  - build
+
+variables:
+  ALLOWED_BRANCHES: '^feature/(m0-preflight|m1-domain|m2-invoices|m3-subscription|d4-service|d5-billing|d6-failures|d7-reporting|a4-unit-tests|a5-service-tests|a6-api-tests|a7-billing-api-tests|reflection)$'
+  # Provided files: nobody may change them.
+  PROTECTED_FILES: >-
+    pom.xml
+    .gitlab-ci.yml
+    src/test/java/com/substream/structure/
+    src/test/java/com/substream/domain/SubscriptionPlanTest.java
+    src/main/java/com/substream/domain/Identifiable.java
+    src/main/java/com/substream/domain/SubscriptionStatus.java
+    src/main/java/com/substream/domain/InvoiceStatus.java
+    src/main/java/com/substream/exception/CustomerNotFoundException.java
+    src/main/java/com/substream/exception/InvalidCustomerDataException.java
+    src/main/java/com/substream/exception/InvalidPlanTransitionException.java
+    src/main/java/com/substream/exception/InvalidStatusTransitionException.java
+    src/main/java/com/substream/exception/PaymentGatewayTimeoutException.java
+    src/main/java/com/substream/exception/SubStreamException.java
+    src/main/java/com/substream/exception/SubscriptionNotFoundException.java
+    src/main/java/com/substream/external/PaymentGateway.java
+    src/main/java/com/substream/external/PaymentResult.java
+    src/main/java/com/substream/repository/Repository.java
+    src/main/java/com/substream/repository/CustomerRepository.java
+    src/main/java/com/substream/repository/SubscriptionRepository.java
+    src/main/java/com/substream/repository/InvoiceRepository.java
+    src/main/java/com/substream/repository/InMemoryCustomerRepository.java
+    src/main/java/com/substream/repository/InMemorySubscriptionRepository.java
+    src/main/java/com/substream/repository/InMemoryInvoiceRepository.java
+    src/main/java/com/substream/service/BillingConfig.java
+    src/main/java/com/substream/service/BillingRunSummary.java
+    src/main/java/com/substream/service/NotificationService.java
+    src/main/java/com/substream/service/EmailNotificationService.java
+    src/main/java/com/substream/aqa/
+    src/test/java/com/substream/aqa/pricing/PricingServiceExampleTest.java
+    src/test/java/com/substream/aqa/pricing/api/CouponApiExampleTest.java
+
+rules-check:
+  stage: check
+  image: {name: alpine/git:latest, entrypoint: [""]}   # the image starts git by default; the job needs a shell
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: "0"          # the whole history, so the branch and main always meet
+  script:
+    - |
+      echo "Branch: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME -> $CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      if ! echo "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME" | grep -Eq "$ALLOWED_BRANCHES"; then
+        echo "REJECTED: '$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME' is not an allowed branch name."
+        echo "See docs/SUBMISSION_RULES.md, section 2, for the exact names."
+        exit 1
+      fi
+      if [ "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME" != "main" ]; then
+        echo "REJECTED: Merge Requests must target 'main'."
+        exit 1
+      fi
+      MAIN="origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+      git fetch --quiet origin "+refs/heads/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:refs/remotes/$MAIN"
+      if BASE=$(git merge-base "$MAIN" HEAD 2>/dev/null); then
+        CHANGED=$(git diff --name-only "$BASE" HEAD) || { echo "REJECTED: cannot compare with main."; exit 1; }
+      else
+        echo "Note: this branch has no history in common with main; comparing it with main directly."
+        CHANGED=$(git diff --name-only "$MAIN" HEAD) || { echo "REJECTED: cannot compare with main."; exit 1; }
+      fi
+      PROTECTED="$PROTECTED_FILES"
+      for f in $PROTECTED; do
+        case "$f" in
+          */) HIT=$(echo "$CHANGED" | grep "^$f" || true) ;;
+          *)  HIT=$(echo "$CHANGED" | grep -x "$f" || true) ;;
+        esac
+        if [ -n "$HIT" ]; then
+          echo "REJECTED: protected file(s) modified: $HIT"
+          echo "Restore them from main: git checkout origin/main -- <file>"
+          exit 1
+        fi
+      done
+      echo "Rules OK"
+
+compile:
+  stage: build
+  timeout: 10m
+  script:
+    # javac only reads the code: annotation processing is off, so no code of the project runs here.
+    - find src/main/java -name '*.java' > sources.txt
+    - javac -proc:none -nowarn -encoding UTF-8 --release 17 -Xmaxerrs 50 -d target/classes @sources.txt
+    - echo "Compiled OK"
