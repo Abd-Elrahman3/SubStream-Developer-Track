@@ -4,6 +4,7 @@ package com.substream.service;
 import com.substream.domain.Customer;
 import com.substream.domain.Subscription;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -14,17 +15,24 @@ import java.util.List;
  */
 public abstract class TemplateNotificationService implements NotificationService {
 
+    private final List<String> sentMessages = new ArrayList<>();
+
     /** Builds the message of BR-603 and stores {@code format(resolveRecipient(customer), message)}. */
     @Override
     public final void notifySuspension(Customer customer, Subscription subscription) {
         // TODO: D7, BR-603
-        throw new UnsupportedOperationException("TODO: D7, BR-603");
+        String message = "Dear " + customer.getName()
+                + ", your " + subscription.getPlan()
+                + " subscription " + subscription.getId()
+                + " has been suspended after " + subscription.getFailedPaymentAttempts()
+                + " failed payment attempt(s). Please update your payment method.";
+        sentMessages.add(format(resolveRecipient(customer), message));
     }
 
     /** Every delivered line, oldest first. The returned list cannot be modified. */
     public List<String> getSentMessages() {
         // TODO: D7, BR-603
-        throw new UnsupportedOperationException("TODO: D7, BR-603");
+        return List.copyOf(sentMessages);
     }
 
     protected abstract String resolveRecipient(Customer customer);
